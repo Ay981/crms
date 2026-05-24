@@ -59,11 +59,6 @@ class BookingController extends Controller
                 DB::rollback();
                 $this->error('This car is currently under maintenance', 422);
             }
-            if ($car['status'] === 'rented') {
-                DB::rollback();
-                $this->error('This car is currently rented', 422);
-            }
-
             // Overlap check: existing booking overlaps if start < new_end AND end > new_start
             $conflict = DB::table('bookings')
                 ->where('car_id', (int) $data['car_id'])
@@ -256,6 +251,7 @@ class BookingController extends Controller
                 'cars.brand',
                 'cars.model',
                 'cars.image_url',
+                'cars.daily_rate',
                 'cars.penalty_rate',
                 'users.name as customer_name',
                 'users.email as customer_email',
@@ -309,49 +305,80 @@ class BookingController extends Controller
             $this->error('Only confirmed or active bookings can be returned. Current status: ' . $booking['status'], 422);
         }
 
-        $car      = Car::find((int) $booking['car_id']);
-        $expected = strtotime($booking['expected_return_date']);
-        $actual   = strtotime($data['actual_return_date']);
-        $lateDays = max(0, (int) round(($actual - $expected) / 86400));
-        $penalty  = round($lateDays * (float) $car['penalty_rate'], 2);
-        $final    = round((float) $booking['final_total'] + $penalty, 2);
-
-        DB::table('bookings')->where('id', (int) $id)->update([
-            'actual_return_date' => $data['actual_return_date'],
-            'condition'          => $data['condition'],
-            'penalty_amount'     => $penalty,
-            'final_total'        => $final,
-            'status'             => 'completed',
-        ]);
-
-        // Car status based on condition
-        $newCarStatus = $data['condition'] === 'damaged' ? 'maintenance' : 'available';
-        DB::table('cars')->where('id', (int) $car['id'])->update(['status' => $newCarStatus]);
-
-        // Create damage report if needed
-        if ($data['condition'] === 'damaged') {
-            DB::table('damage_reports')->insert([
-                'booking_id'  => (int) $id,
-                'car_id'      => (int) $car['id'],
-                'description' => $data['damage_description'] ?? 'Damage reported on return',
-                'repair_cost' => (float) ($data['repair_cost'] ?? 0),
-                'resolved'    => 0,
-            ]);
+        if (strtotime($data['actual_return_date']) < strtotime($booking['start_date'])) {
+            $this->error('Actual return date cannot be before the booking start date', 422);
         }
 
-        // Notify first person on waitlist if car is now available
-        if ($newCarStatus === 'available') {
-            $waiting = DB::table('waitlist')
-                ->where('car_id', (int) $car['id'])
-                ->where('notified', 0)
-                ->orderBy('id', 'ASC')
+        DB::beginTransaction();
+
+        try {
+            $car = DB::table('cars')
+                ->where('id', (int) $booking['car_id'])
+                ->lockForUpdate()
                 ->first();
 
-            if ($waiting) {
+            if (!$car) {
+                DB::rollback();
+                $this->error('Car not found', 404);
+            }
+
+            $expected = strtotime($booking['expected_return_date']);
+            $actual   = strtotime($data['actual_return_date']);
+            $lateDays = max(0, (int) round(($actual - $expected) / 86400));
+            $penalty  = round($lateDays * (float) $car['penalty_rate'], 2);
+
+            $isEarlyReturn = $actual < $expected;
+            $billableEnd   = $isEarlyReturn ? $data['actual_return_date'] : $booking['end_date'];
+            $billableDays  = max(1, daysBetween($booking['start_date'], $billableEnd));
+            $discountRate  = (float) $booking['base_total'] > 0
+                ? (float) $booking['discount_amount'] / (float) $booking['base_total']
+                : 0.0;
+            $baseTotal     = $isEarlyReturn
+                ? round((float) $car['daily_rate'] * $billableDays, 2)
+                : (float) $booking['base_total'];
+            $discountAmt   = $isEarlyReturn
+                ? round($baseTotal * $discountRate, 2)
+                : (float) $booking['discount_amount'];
+            $final         = round($baseTotal - $discountAmt + $penalty, 2);
+
+            DB::table('bookings')->where('id', (int) $id)->update([
+                'end_date'           => $isEarlyReturn ? $data['actual_return_date'] : $booking['end_date'],
+                'actual_return_date' => $data['actual_return_date'],
+                'condition'          => $data['condition'],
+                'base_total'         => $baseTotal,
+                'discount_amount'    => $discountAmt,
+                'penalty_amount'     => $penalty,
+                'final_total'        => $final,
+                'status'             => 'completed',
+            ]);
+
+            // Car status based on condition
+            $newCarStatus = $data['condition'] === 'damaged' ? 'maintenance' : 'available';
+            DB::table('cars')->where('id', (int) $car['id'])->update(['status' => $newCarStatus]);
+
+            // Create damage report if needed
+            if ($data['condition'] === 'damaged') {
+                DB::table('damage_reports')->insert([
+                    'booking_id'  => (int) $id,
+                    'car_id'      => (int) $car['id'],
+                    'description' => $data['damage_description'] ?? 'Damage reported on return',
+                    'repair_cost' => (float) ($data['repair_cost'] ?? 0),
+                    'resolved'    => 0,
+                ]);
+            }
+
+            // Notify everyone waiting for this car once it can be booked again.
+            if ($newCarStatus === 'available') {
                 DB::table('waitlist')
-                    ->where('id', (int) $waiting['id'])
+                    ->where('car_id', (int) $car['id'])
+                    ->where('notified', 0)
                     ->update(['notified' => 1]);
             }
+
+            DB::commit();
+        } catch (Throwable $e) {
+            DB::rollback();
+            throw $e;
         }
 
         $this->success(Booking::find((int) $id), 'Return logged successfully');

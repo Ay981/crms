@@ -13,8 +13,12 @@
 		const isStaticDevServer = isLocalDevHost && ['5500', '5173', '3000'].includes(port);
 
 		if (isStaticDevServer || protocol === 'file:') {
-			return 'http://127.0.0.1:8082';
+			return 'http://localhost:8082';
 		}
+		  // VS Code dev tunnel — frontend is on port 5500 tunnel, backend is on 8082 tunnel
+    	if (hostname.includes('devtunnels.ms')) {
+        return origin.replace('-5500.', '-8082.');
+    }
 
 		if (protocol === 'http:' || protocol === 'https:') {
 			return `${origin}/api`;

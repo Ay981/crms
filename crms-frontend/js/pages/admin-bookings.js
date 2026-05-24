@@ -105,7 +105,11 @@
 				<p>${UI.escape(returnBooking.customer_name)} · ${UI.date(returnBooking.start_date, { year: false })} → ${UI.date(returnBooking.expected_return_date || returnBooking.end_date)}</p>
 				<span>${UI.escape(returnBooking.reference_number || `#${returnBooking.id}`)}</span>
 			</div>`;
-		document.getElementById('actual-return-date').value = new Date().toISOString().slice(0, 10);
+		const returnDateInput = document.getElementById('actual-return-date');
+		const today = new Date().toISOString().slice(0, 10);
+		const startDate = String(returnBooking.start_date).slice(0, 10);
+		returnDateInput.min = startDate;
+		returnDateInput.value = today < startDate ? startDate : today;
 		document.getElementById('actual-return-time').value = new Date().toTimeString().slice(0, 5);
 		setCondition('excellent');
 		setReturnStep('details');
@@ -123,6 +127,43 @@
 			: Math.max(0, Math.round((actual - expected) / 86400000));
 		const penalty = lateDays * Number(returnBooking.penalty_rate || 0);
 		return { lateDays, penalty };
+	}
+
+	function returnChargePreview(actualReturnDate) {
+		if (!returnBooking) {
+			return { baseTotal: 0, discount: 0, penalty: 0, finalTotal: 0, earlyDays: 0 };
+		}
+
+		const expectedValue = returnBooking.expected_return_date || returnBooking.end_date;
+		const actual = new Date(`${actualReturnDate}T00:00:00`);
+		const expected = new Date(`${String(expectedValue).slice(0, 10)}T00:00:00`);
+		const start = new Date(`${String(returnBooking.start_date).slice(0, 10)}T00:00:00`);
+		const { penalty } = lateFee();
+		const originalBase = Number(returnBooking.base_total || 0);
+		const originalDiscount = Number(returnBooking.discount_amount || 0);
+		const discountRate = originalBase > 0 ? originalDiscount / originalBase : 0;
+
+		if (Number.isNaN(actual.getTime()) || Number.isNaN(expected.getTime()) || actual >= expected) {
+			const baseTotal = originalBase || Number(returnBooking.final_total || 0) + originalDiscount;
+			return {
+				baseTotal,
+				discount: originalDiscount,
+				penalty,
+				finalTotal: baseTotal - originalDiscount + penalty,
+				earlyDays: 0,
+			};
+		}
+
+		const earlyDays = Math.max(1, Math.ceil((actual - start) / 86400000));
+		const baseTotal = Number(returnBooking.daily_rate || 0) * earlyDays;
+		const discount = baseTotal * discountRate;
+		return {
+			baseTotal,
+			discount,
+			penalty,
+			finalTotal: baseTotal - discount + penalty,
+			earlyDays,
+		};
 	}
 
 	function updateLateAlert() {
@@ -148,16 +189,17 @@
 		if (!returnBooking || !confirmList) return;
 		const formData = Object.fromEntries(new FormData(form).entries());
 		const { lateDays, penalty } = lateFee();
-		const baseTotal = Number(returnBooking.final_total || 0);
+		const charge = returnChargePreview(formData.actual_return_date);
 		const repairEstimate = formData.condition === 'damaged' ? Number(formData.repair_cost || 0) : 0;
-		const finalTotal = baseTotal + penalty + repairEstimate;
+		const finalTotal = charge.finalTotal + repairEstimate;
 		const rows = [
 			['Booking ref', returnBooking.reference_number || `#${returnBooking.id}`],
 			['Customer', returnBooking.customer_name],
 			['Vehicle', `${returnBooking.brand} ${returnBooking.model}`],
 			['Actual return date', `${UI.date(formData.actual_return_date)}${formData.actual_return_time ? ` at ${formData.actual_return_time}` : ''}`],
 			['Condition', formData.condition],
-			['Base rental total', UI.money(baseTotal)],
+			['Rental charge', UI.money(charge.baseTotal)],
+			['Discount', charge.discount ? `- ${UI.money(charge.discount)}` : UI.money(0)],
 			['Late penalty', lateDays ? `+ ${UI.money(penalty)}` : UI.money(0)],
 			['Grand total', UI.money(finalTotal)],
 		];
