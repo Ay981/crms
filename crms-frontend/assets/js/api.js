@@ -12,13 +12,17 @@
 		const isLocalDevHost = hostname === 'localhost' || hostname === '127.0.0.1';
 		const isStaticDevServer = isLocalDevHost && ['5500', '5173', '3000'].includes(port);
 
-		if (isStaticDevServer || protocol === 'file:') {
-			return 'http://localhost:8082';
+		// Match the API host to the page host so the session cookie (SameSite=Lax)
+		// is treated as same-site and gets sent. localhost:5500 -> localhost:8082,
+		// 127.0.0.1:5500 -> 127.0.0.1:8082. Mixing the two breaks auth.
+		if (isStaticDevServer) {
+			return `${protocol}//${hostname}:8082`;
 		}
-		  // VS Code dev tunnel — frontend is on port 5500 tunnel, backend is on 8082 tunnel
-    	if (hostname.includes('devtunnels.ms')) {
-        return origin.replace('-5500.', '-8082.');
-    }
+
+		if (protocol === 'file:') {
+			return 'http://127.0.0.1:8082';
+		}
+	
 
 		if (protocol === 'http:' || protocol === 'https:') {
 			return `${origin}/api`;

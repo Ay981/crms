@@ -4,6 +4,16 @@ declare(strict_types=1);
 
 define('ROOT', __DIR__);
 
+// PHP built-in dev server: serve existing static files (e.g. uploaded images)
+// directly, and route everything else through this front controller. Apache
+// handles this via .htaccess in production, but the CLI server needs it here.
+if (PHP_SAPI === 'cli-server') {
+    $requestPath = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+    if ($requestPath !== '/' && is_file(ROOT . $requestPath)) {
+        return false;
+    }
+}
+
 require ROOT . '/core/helpers.php';
 
 $isProduction = (env('APP_ENV') === 'production');
